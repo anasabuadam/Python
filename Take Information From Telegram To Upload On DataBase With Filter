@@ -1,0 +1,104 @@
+from telethon.sync import TelegramClient
+from telethon.tl.types import InputMessagesFilterDocument
+import pyodbc
+import os
+from datetime import datetime
+import pytz
+import re
+
+# إعدادات التليجرام
+api_id = ''
+api_hash = ''
+channel_username = ''
+
+# إعدادات قاعدة البيانات
+connection_string = ('')
+
+# دالة لتنزيل الملف من تليجرام باستخدام الاسم الأصلي
+def download_file_from_telegram(client, message):
+    file_name = message.file.name or f"{message.id}.txt"  # استخدم اسم الملف الأصلي أو اسم افتراضي
+    file_path = f'./downloads/{file_name}'
+    client.download_media(message.media, file=file_path)
+    return file_path
+
+# دالة لفلترة البيانات من الملف النصي باستخدام regex
+def sanitize_file(file_path):
+    urls, emails, passwords = [], [], []
+    url_regex = re.compile(r'https?://[^\s/:$.?#].[^\s]*')
+    email_regex = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+    password_regex = re.compile(r'(?<=:)([^\s:]+)(?=\s|$)')  # افتراض أن كلمات المرور لا تحتوي على مسافات
+
+    with open(file_path, 'r', encoding='utf-8') as file:
+        for line in file:
+            url_match = url_regex.search(line)
+            email_match = email_regex.search(line)
+            password_match = password_regex.search(line)
+
+            if url_match:
+                urls.append(url_match.group())
+            if email_match:
+                emails.append(email_match.group())
+            if password_match:
+                passwords.append(password_match.group())
+
+    return urls, emails, passwords
+
+# دالة لرفع البيانات إلى قاعدة البيانات
+def upload_to_database(connection_string, urls, emails, passwords):
+    try:
+        conn = pyodbc.connect(connection_string)
+        cursor = conn.cursor()
+        # إعداد البيانات لرفعها
+        data_to_insert = []
+        data_to_insert.extend([(url, email, password) for url, email, password in zip(urls, emails, passwords)])
+        
+        # تنفيذ الاستعلام مرة واحدة
+        query = "INSERT INTO informaitn (Url, UserName, Password) VALUES (?, ?, ?)"
+        cursor.executemany(query, data_to_insert)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print("تم رفع البيانات إلى قاعدة البيانات.")
+    except pyodbc.Error as e:
+        print(f"حدث خطأ أثناء الاتصال بقاعدة البيانات: {e}")
+
+# دالة رئيسية
+def main():
+    last_date = datetime(2022, 1, 1, tzinfo=pytz.UTC)  # تأكد من أن التاريخ يحتوي على معلومات المنطقة الزمنية
+    processed_files = set()
+
+    try:
+        client = TelegramClient('session_name', api_id, api_hash)
+        client.start()
+
+        messages = client.get_messages(channel_username, None, filter=InputMessagesFilterDocument)
+        messages = sorted(messages, key=lambda m: m.date, reverse=True)  # ترتيب الرسائل حسب التاريخ، الأحدث أولاً
+
+        for message in messages:
+            message_date = message.date.astimezone(pytz.UTC)  # تأكد من أن التاريخ يحتوي على معلومات المنطقة الزمنية
+            if message_date <= last_date:
+                break
+
+            if message.id not in processed_files:
+                print(f"تم العثور على ملف: {message.file.name or message.id}")
+                file_path = download_file_from_telegram(client, message)
+                print(f"تم تنزيل الملف: {file_path}")
+
+                urls, emails, passwords = sanitize_file(file_path)
+                print(f"تم فلترة الملف: {file_path}")
+                print(f"URLs: {urls}")
+                print(f"Emails: {emails}")
+                print(f"Passwords: {passwords}")
+
+                upload_to_database(connection_string, urls, emails, passwords)
+                print(f"تم رفع البيانات إلى قاعدة البيانات.")
+                
+                os.remove(file_path)
+                print(f"تم مسح الملف: {file_path}")
+                processed_files.add(message.id)
+                
+    except Exception as e:
+        print(f"حدث خطأ أثناء التشغيل: {e}")
+
+if __name__ == '__main__':
+    main()
